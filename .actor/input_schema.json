@@ -1,0 +1,44 @@
+{
+    "title": "SeLoger.com Scraper",
+    "description": "Extract rental and sale property listings from SeLoger search pages.",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "startUrl": {
+            "title": "Start URL",
+            "type": "string",
+            "description": "SeLoger search URL to scrape.",
+            "editor": "textfield",
+            "prefill": "https://www.seloger.com/classified-search?distributionTypes=Rent&estateTypes=Apartment&locations=AD02FR1"
+        },
+        "results_wanted": {
+            "title": "Maximum results",
+            "type": "integer",
+            "description": "Maximum number of listings to collect.",
+            "minimum": 1,
+            "default": 20,
+            "prefill": 20,
+            "editor": "number"
+        },
+        "max_pages": {
+            "title": "Maximum pages",
+            "type": "integer",
+            "description": "Safety cap on number of paginated result pages.",
+            "minimum": 1,
+            "default": 10,
+            "prefill": 3,
+            "editor": "number"
+        },
+        "proxyConfiguration": {
+            "title": "Proxy configuration",
+            "type": "object",
+            "description": "Optional proxy settings. Enable Apify Proxy if your runs face blocking.",
+            "editor": "proxy",
+            "default": {
+                "useApifyProxy": true
+            }
+        }
+    },
+    "required": [],
+    "additionalProperties": false
+}

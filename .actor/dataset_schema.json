@@ -1,0 +1,68 @@
+{
+    "actorSpecification": 1,
+    "fields": {},
+    "views": {
+        "overview": {
+            "title": "Overview",
+            "transformation": {
+                "fields": [
+                    "id",
+                    "title",
+                    "price_formatted",
+                    "city",
+                    "zip_code",
+                    "rooms",
+                    "living_area_m2",
+                    "energy_class",
+                    "agency_name",
+                    "url"
+                ]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "id": {
+                        "label": "ID",
+                        "format": "text"
+                    },
+                    "title": {
+                        "label": "Type",
+                        "format": "text"
+                    },
+                    "price_formatted": {
+                        "label": "Price",
+                        "format": "text"
+                    },
+                    "city": {
+                        "label": "City",
+                        "format": "text"
+                    },
+                    "zip_code": {
+                        "label": "ZIP",
+                        "format": "text"
+                    },
+                    "rooms": {
+                        "label": "Rooms",
+                        "format": "number"
+                    },
+                    "living_area_m2": {
+                        "label": "Area m2",
+                        "format": "number"
+                    },
+                    "energy_class": {
+                        "label": "Energy",
+                        "format": "text"
+                    },
+                    "agency_name": {
+                        "label": "Agency",
+                        "format": "text"
+                    },
+                    "url": {
+                        "label": "URL",
+                        "format": "link"
+                    }
+                }
+            }
+        }
+    }
+}

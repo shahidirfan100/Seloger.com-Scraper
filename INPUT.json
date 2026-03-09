@@ -1,0 +1,8 @@
+{
+    "startUrl": "https://www.seloger.com/recherche/location/appartement/paris-75000/paris-16eme-arrondissement-75016/ad09fr41",
+    "results_wanted": 20,
+    "max_pages": 2,
+    "proxyConfiguration": {
+        "useApifyProxy": false
+    }
+}
