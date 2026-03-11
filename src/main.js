@@ -181,18 +181,44 @@ function parseProxyForPlaywright(proxyUrl) {
     };
 }
 
+function normalizeProxyConfiguration(config) {
+    if (!config || typeof config !== 'object') return config;
+
+    const normalized = { ...config };
+
+    if (!normalized.groups && Array.isArray(normalized.apifyProxyGroups)) {
+        normalized.groups = normalized.apifyProxyGroups;
+    }
+    if (!normalized.countryCode && typeof normalized.apifyProxyCountry === 'string') {
+        normalized.countryCode = normalized.apifyProxyCountry;
+    }
+
+    return normalized;
+}
+
 async function buildProxyCandidates() {
     const candidates = [];
 
     if (proxyConfig) {
         try {
-            const proxyConfiguration = await Actor.createProxyConfiguration(proxyConfig);
+            const proxyConfiguration = await Actor.createProxyConfiguration(normalizeProxyConfiguration(proxyConfig));
             if (proxyConfiguration && typeof proxyConfiguration.newUrl === 'function') {
-                const proxyUrl = await proxyConfiguration.newUrl();
-                const proxy = parseProxyForPlaywright(proxyUrl);
-                if (proxy) {
-                    candidates.push({ label: 'input-proxy', proxy });
-                } else {
+                let addedProxy = false;
+                for (let attempt = 1; attempt <= 3; attempt += 1) {
+                    try {
+                        const sessionId = `seloger_${Date.now()}_${attempt}_${Math.random().toString(36).slice(2, 8)}`;
+                        const proxyUrl = await proxyConfiguration.newUrl(sessionId);
+                        const proxy = parseProxyForPlaywright(proxyUrl);
+                        if (proxy) {
+                            candidates.push({ label: `input-proxy-${attempt}`, proxy });
+                            addedProxy = true;
+                        }
+                    } catch (error) {
+                        log.warning(`Could not create proxy URL for attempt ${attempt}: ${error.message}`);
+                    }
+                }
+
+                if (!addedProxy) {
                     candidates.push({ label: 'input-no-proxy', proxy: undefined });
                 }
             } else {
@@ -206,7 +232,10 @@ async function buildProxyCandidates() {
         candidates.push({ label: 'direct-no-proxy', proxy: undefined });
         if (Actor.isAtHome()) {
             try {
-                const fallbackProxyConfiguration = await Actor.createProxyConfiguration({ useApifyProxy: true });
+                const fallbackProxyConfiguration = await Actor.createProxyConfiguration({
+                    useApifyProxy: true,
+                    groups: ['RESIDENTIAL'],
+                });
                 if (fallbackProxyConfiguration && typeof fallbackProxyConfiguration.newUrl === 'function') {
                     const fallbackProxyUrl = await fallbackProxyConfiguration.newUrl();
                     const fallbackProxy = parseProxyForPlaywright(fallbackProxyUrl);

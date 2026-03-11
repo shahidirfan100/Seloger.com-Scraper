@@ -34,8 +34,17 @@
             "type": "object",
             "description": "Optional proxy settings. Enable Apify Proxy if your runs face blocking.",
             "editor": "proxy",
+            "prefill": {
+                "useApifyProxy": true,
+                "apifyProxyGroups": [
+                    "RESIDENTIAL"
+                ]
+            },
             "default": {
-                "useApifyProxy": true
+                "useApifyProxy": true,
+                "apifyProxyGroups": [
+                    "RESIDENTIAL"
+                ]
             }
         }
     },
