@@ -11,6 +11,12 @@ const USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
 ];
 
+const NAVIGATION_TIMEOUT_MS = 25_000;
+const HOME_WARMUP_TIMEOUT_MS = 18_000;
+const WARMUP_ATTEMPTS = 3;
+const SEARCH_API_RETRIES = 3;
+const DETAILS_API_RETRIES = 3;
+
 await Actor.init();
 
 const input = (await Actor.getInput()) || {};
@@ -32,6 +38,26 @@ let totalSaved = 0;
 let runError;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function safeGoto(page, url, { timeoutMs, waitUntil = 'domcontentloaded', label = 'Navigation', retries = 1 } = {}) {
+    let lastError;
+
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
+        try {
+            await page.goto(url, { waitUntil, timeout: timeoutMs });
+            return { ok: true };
+        } catch (error) {
+            lastError = error;
+            log.warning(`${label} failed (attempt ${attempt}/${retries}): ${error.message}`);
+
+            if (attempt < retries) {
+                await sleep(900 * attempt);
+            }
+        }
+    }
+
+    return { ok: false, error: lastError };
+}
 
 function toPositiveInteger(value, fallback) {
     const parsed = Number.parseInt(String(value), 10);
@@ -249,6 +275,32 @@ async function buildProxyCandidates() {
         }
     }
 
+    if (Actor.isAtHome()) {
+        const alreadyHasApifyFallback = candidates.some((candidate) => candidate.label.startsWith('apify-proxy-'));
+        if (!alreadyHasApifyFallback) {
+            try {
+                const autoHealProxyConfiguration = await Actor.createProxyConfiguration({
+                    useApifyProxy: true,
+                    groups: ['RESIDENTIAL'],
+                });
+
+                if (autoHealProxyConfiguration && typeof autoHealProxyConfiguration.newUrl === 'function') {
+                    const autoHealProxyUrl = await autoHealProxyConfiguration.newUrl();
+                    const autoHealProxy = parseProxyForPlaywright(autoHealProxyUrl);
+                    if (autoHealProxy) {
+                        candidates.push({ label: 'apify-proxy-auto-heal', proxy: autoHealProxy });
+                    }
+                }
+            } catch (error) {
+                log.warning(`Could not initialize auto-heal proxy fallback: ${error.message}`);
+            }
+        }
+    }
+
+    if (!candidates.some((candidate) => !candidate.proxy)) {
+        candidates.push({ label: 'direct-no-proxy-fallback', proxy: undefined });
+    }
+
     // Remove exact duplicates.
     const seen = new Set();
     return candidates.filter((candidate) => {
@@ -290,28 +342,61 @@ async function isChallengePage(page) {
 }
 
 async function warmUpSession(page, targetUrl) {
-    // Warm up cookies on root first.
-    try {
-        await page.goto('https://www.seloger.com/', { waitUntil: 'domcontentloaded', timeout: 90_000 });
-        await sleep(1_200);
-    } catch {
-        // Continue with target URL anyway.
+    let sawChallenge = false;
+    let sawNavigationFailure = false;
+
+    const homeWarmup = await safeGoto(page, 'https://www.seloger.com/', {
+        timeoutMs: HOME_WARMUP_TIMEOUT_MS,
+        waitUntil: 'commit',
+        label: 'Home warmup',
+        retries: 2,
+    });
+    if (homeWarmup.ok) {
+        await sleep(900);
+    } else {
+        sawNavigationFailure = true;
     }
 
-    for (let attempt = 1; attempt <= 4; attempt += 1) {
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
-        await sleep(1_200);
+    for (let attempt = 1; attempt <= WARMUP_ATTEMPTS; attempt += 1) {
+        const targetWarmup = await safeGoto(page, targetUrl, {
+            timeoutMs: NAVIGATION_TIMEOUT_MS,
+            waitUntil: 'commit',
+            label: `Search warmup ${attempt}`,
+            retries: 2,
+        });
+
+        if (!targetWarmup.ok) {
+            sawNavigationFailure = true;
+            await sleep(1_100 * attempt);
+            continue;
+        }
+
+        await sleep(900);
         await dismissCookieBanner(page);
-        await sleep(700);
+        await sleep(500);
 
-        const blocked = await isChallengePage(page);
-        if (!blocked) return true;
+        let blocked = false;
+        try {
+            blocked = await isChallengePage(page);
+        } catch {
+            sawNavigationFailure = true;
+            blocked = true;
+        }
 
-        log.warning(`Challenge page detected during warmup (attempt ${attempt}/4).`);
-        await sleep(2_000 * attempt);
+        if (!blocked) {
+            return { ok: true, blockedByChallenge: false, retryableFailure: false };
+        }
+
+        sawChallenge = true;
+        log.warning(`Challenge page detected during warmup (attempt ${attempt}/${WARMUP_ATTEMPTS}).`);
+        await sleep(1_500 * attempt);
     }
 
-    return false;
+    return {
+        ok: false,
+        blockedByChallenge: sawChallenge,
+        retryableFailure: sawNavigationFailure || sawChallenge,
+    };
 }
 
 async function fetchSearchPage(page, criteria, pageNumber) {
@@ -376,34 +461,61 @@ async function fetchClassifiedList(page, ids) {
 
 async function fetchWithRetries(fn, { retries = 4, waitMs = 2500, label, onRetry }) {
     let lastResult;
+    let lastError;
+
     for (let attempt = 1; attempt <= retries; attempt += 1) {
-        lastResult = await fn();
+        try {
+            lastResult = await fn();
+        } catch (error) {
+            lastError = error;
+            lastResult = {
+                status: 0,
+                data: null,
+                bodyPreview: '',
+                thrown: true,
+                errorMessage: error.message,
+            };
+        }
+
         if (lastResult?.status === 200 && lastResult?.data) {
             return lastResult;
         }
 
-        log.warning(`${label} failed (attempt ${attempt}/${retries}), status ${lastResult?.status}.`);
+        const statusInfo = lastResult?.status ?? 'unknown';
+        const errorInfo = lastResult?.errorMessage ? ` Error: ${lastResult.errorMessage}` : '';
+        log.warning(`${label} failed (attempt ${attempt}/${retries}), status ${statusInfo}.${errorInfo}`);
+
         if (attempt < retries) {
             if (onRetry) await onRetry(lastResult, attempt);
             await sleep(waitMs);
         }
     }
-    return lastResult;
+
+    return (
+        lastResult || {
+            status: 0,
+            data: null,
+            bodyPreview: '',
+            thrown: true,
+            errorMessage: lastError?.message || 'Unknown retry failure',
+        }
+    );
 }
 
 async function runWithCandidate(criteria, candidate) {
     log.info(`Using browser strategy: ${candidate.label}`);
-
-    const browser = await chromium.launch({
-        headless: true,
-        channel: 'chrome',
-        proxy: candidate.proxy,
-        args: ['--disable-blink-features=AutomationControlled'],
-    });
-
+    let browser;
     let blockedByChallenge = false;
+    let retryableFailure = false;
 
     try {
+        browser = await chromium.launch({
+            headless: true,
+            channel: 'chrome',
+            proxy: candidate.proxy,
+            args: ['--disable-blink-features=AutomationControlled'],
+        });
+
         const context = await browser.newContext({
             userAgent: USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
             viewport: { width: 1366, height: 768 },
@@ -420,11 +532,12 @@ async function runWithCandidate(criteria, candidate) {
 
         const page = await context.newPage();
 
-        const warmupOk = await warmUpSession(page, initialUrl);
-        if (!warmupOk) {
-            blockedByChallenge = true;
-            log.warning('Warmup could not pass challenge page.');
-            return { blockedByChallenge };
+        const warmupState = await warmUpSession(page, initialUrl);
+        if (!warmupState.ok) {
+            blockedByChallenge = warmupState.blockedByChallenge;
+            retryableFailure = warmupState.retryableFailure;
+            log.warning('Warmup could not establish a stable browsing session.');
+            return { blockedByChallenge, retryableFailure };
         }
 
         for (let pageNumber = 1; pageNumber <= maxPages && totalSaved < resultsWanted; pageNumber += 1) {
@@ -433,7 +546,7 @@ async function runWithCandidate(criteria, candidate) {
             const searchResult = await fetchWithRetries(
                 () => fetchSearchPage(page, criteria, pageNumber),
                 {
-                    retries: 4,
+                    retries: SEARCH_API_RETRIES,
                     waitMs: 2_000,
                     label: `Search API page ${pageNumber}`,
                     onRetry: async (res, attempt) => {
@@ -455,6 +568,9 @@ async function runWithCandidate(criteria, candidate) {
                 if (searchResult?.status === 403 && isChallengePreview(searchResult?.bodyPreview)) {
                     blockedByChallenge = true;
                 }
+                if (searchResult?.thrown || searchResult?.status === 0 || (searchResult?.status >= 500 && searchResult?.status < 600)) {
+                    retryableFailure = true;
+                }
                 log.warning(`Search API unavailable on page ${pageNumber}. Preview: ${searchResult?.bodyPreview || ''}`);
                 break;
             }
@@ -473,7 +589,7 @@ async function runWithCandidate(criteria, candidate) {
             const detailsResult = await fetchWithRetries(
                 () => fetchClassifiedList(page, ids),
                 {
-                    retries: 4,
+                    retries: DETAILS_API_RETRIES,
                     waitMs: 1_500,
                     label: `Classified list page ${pageNumber}`,
                     onRetry: async (res, attempt) => {
@@ -488,6 +604,9 @@ async function runWithCandidate(criteria, candidate) {
             if (detailsResult?.status !== 200 || !Array.isArray(detailsResult?.data)) {
                 if (detailsResult?.status === 403 && isChallengePreview(detailsResult?.bodyPreview)) {
                     blockedByChallenge = true;
+                }
+                if (detailsResult?.thrown || detailsResult?.status === 0 || (detailsResult?.status >= 500 && detailsResult?.status < 600)) {
+                    retryableFailure = true;
                 }
                 log.warning(`Classified list API unavailable on page ${pageNumber}. Preview: ${detailsResult?.bodyPreview || ''}`);
                 break;
@@ -517,11 +636,21 @@ async function runWithCandidate(criteria, candidate) {
 
             if (ids.length < pageSize) break;
         }
+    } catch (error) {
+        retryableFailure = true;
+        const message = error?.message || String(error);
+        log.warning(`Strategy ${candidate.label} failed with recoverable error: ${message}`);
     } finally {
-        await browser.close();
+        if (browser) {
+            try {
+                await browser.close();
+            } catch {
+                // Browser may already be closed.
+            }
+        }
     }
 
-    return { blockedByChallenge };
+    return { blockedByChallenge, retryableFailure };
 }
 
 try {
@@ -534,6 +663,7 @@ try {
 
     let blockedEverywhere = false;
     let triedAny = false;
+    let sawRetryableFailure = false;
 
     for (const candidate of candidates) {
         triedAny = true;
@@ -543,11 +673,19 @@ try {
         if (result.blockedByChallenge) {
             blockedEverywhere = true;
         }
+        if (result.retryableFailure) {
+            sawRetryableFailure = true;
+        }
 
         if (totalSaved >= resultsWanted) break;
         if (totalSaved > before) {
             // Got some data with this strategy, no need to rotate.
             break;
+        }
+
+        if (result.retryableFailure) {
+            log.info(`Switching strategy after recoverable failure: ${candidate.label}.`);
+            continue;
         }
 
         // If not blocked, likely legitimate no-result criteria. Stop trying.
@@ -557,9 +695,13 @@ try {
     }
 
     if (triedAny && totalSaved === 0 && blockedEverywhere) {
-        throw new Error(
-            'Blocked by SeLoger anti-bot protection (DataDome). Run again with Apify Proxy enabled, preferably RESIDENTIAL.',
+        log.warning(
+            'Blocked by SeLoger anti-bot protection (DataDome) across all strategies. Consider Apify Proxy RESIDENTIAL with fresh sessions.',
         );
+    }
+
+    if (triedAny && totalSaved === 0 && sawRetryableFailure && !blockedEverywhere) {
+        log.warning('Run completed without crash, but transient navigation/API failures prevented data extraction this time.');
     }
 } catch (error) {
     runError = error;
